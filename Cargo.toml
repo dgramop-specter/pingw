@@ -1,0 +1,20 @@
+[package]
+name = "pingw"
+version = "0.1.0"
+edition = "2021"
+description = "Ping through a specific interface + gateway combo without touching the routing table"
+license = "MIT OR Apache-2.0"
+
+[features]
+default = ["cli"]
+cli = ["dep:clap"]
+
+[dependencies]
+pnet = "0.35"
+thiserror = "1"
+rand = "0.8"
+clap = { version = "4", features = ["derive"], optional = true }
+
+[[bin]]
+name = "pingw"
+required-features = ["cli"]
