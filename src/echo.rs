@@ -22,6 +22,69 @@ pub(crate) struct EchoReply {
     pub bytes: usize,
 }
 
+struct EchoFrame {
+    buf: Vec<u8>,
+}
+
+impl EchoFrame {
+    const IP_OFF: usize = ETH_HDR;
+    const ICMP_OFF: usize = ETH_HDR + IPV4_HDR;
+
+    fn with_payload(payload_size: usize) -> Self {
+        Self {
+            buf: vec![0u8; Self::ICMP_OFF + ICMP_ECHO_HDR + payload_size],
+        }
+    }
+
+    fn write_ethernet(&mut self, src: MacAddr, dst: MacAddr) {
+        let mut eth = MutableEthernetPacket::new(&mut self.buf).unwrap();
+        eth.set_source(src);
+        eth.set_destination(dst);
+        eth.set_ethertype(EtherTypes::Ipv4);
+    }
+
+    fn write_ipv4(&mut self, src: Ipv4Addr, dst: Ipv4Addr, ttl: u8) {
+        let total_len = (self.buf.len() - Self::IP_OFF) as u16;
+        let mut ip = MutableIpv4Packet::new(&mut self.buf[Self::IP_OFF..]).unwrap();
+        ip.set_version(4);
+        ip.set_header_length(5);
+        ip.set_total_length(total_len);
+        ip.set_identification(rand::random());
+        ip.set_flags(Ipv4Flags::DontFragment);
+        ip.set_ttl(ttl);
+        ip.set_next_level_protocol(IpNextHeaderProtocols::Icmp);
+        ip.set_source(src);
+        ip.set_destination(dst);
+        ip.set_checksum(0);
+        let cksum = pnet::packet::ipv4::checksum(&ip.to_immutable());
+        ip.set_checksum(cksum);
+    }
+
+    fn write_icmp_echo(&mut self, id: u16, seq: u16) {
+        let payload_size = self.buf.len() - Self::ICMP_OFF - ICMP_ECHO_HDR;
+        {
+            let mut echo =
+                MutableEchoRequestPacket::new(&mut self.buf[Self::ICMP_OFF..]).unwrap();
+            echo.set_icmp_type(IcmpTypes::EchoRequest);
+            echo.set_icmp_code(IcmpCode(0));
+            echo.set_identifier(id);
+            echo.set_sequence_number(seq);
+            let payload: Vec<u8> = (0..payload_size).map(|i| (i & 0xff) as u8).collect();
+            echo.set_payload(&payload);
+            echo.set_checksum(0);
+        }
+        let cksum =
+            pnet::packet::icmp::checksum(&IcmpPacket::new(&self.buf[Self::ICMP_OFF..]).unwrap());
+        MutableEchoRequestPacket::new(&mut self.buf[Self::ICMP_OFF..])
+            .unwrap()
+            .set_checksum(cksum);
+    }
+
+    fn as_bytes(&self) -> &[u8] {
+        &self.buf
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn send(
     tx: &mut dyn DataLinkSender,
@@ -34,55 +97,12 @@ pub(crate) fn send(
     sequence: u16,
     payload_size: usize,
 ) -> Result<(), Error> {
-    let icmp_len = ICMP_ECHO_HDR + payload_size;
-    let ip_total_len = IPV4_HDR + icmp_len;
-    let frame_len = ETH_HDR + ip_total_len;
+    let mut frame = EchoFrame::with_payload(payload_size);
+    frame.write_ethernet(src_mac, dst_mac);
+    frame.write_ipv4(src_ip, dst_ip, ttl);
+    frame.write_icmp_echo(identifier, sequence);
 
-    let mut buf = vec![0u8; frame_len];
-
-    {
-        let mut eth = MutableEthernetPacket::new(&mut buf).unwrap();
-        eth.set_destination(dst_mac);
-        eth.set_source(src_mac);
-        eth.set_ethertype(EtherTypes::Ipv4);
-    }
-
-    {
-        let mut ip = MutableIpv4Packet::new(&mut buf[ETH_HDR..]).unwrap();
-        ip.set_version(4);
-        ip.set_header_length(5);
-        ip.set_dscp(0);
-        ip.set_ecn(0);
-        ip.set_total_length(ip_total_len as u16);
-        ip.set_identification(rand::random());
-        ip.set_flags(Ipv4Flags::DontFragment);
-        ip.set_fragment_offset(0);
-        ip.set_ttl(ttl);
-        ip.set_next_level_protocol(IpNextHeaderProtocols::Icmp);
-        ip.set_source(src_ip);
-        ip.set_destination(dst_ip);
-        ip.set_checksum(0);
-        let cksum = pnet::packet::ipv4::checksum(&ip.to_immutable());
-        ip.set_checksum(cksum);
-    }
-
-    let icmp_off = ETH_HDR + IPV4_HDR;
-    {
-        let mut echo = MutableEchoRequestPacket::new(&mut buf[icmp_off..]).unwrap();
-        echo.set_icmp_type(IcmpTypes::EchoRequest);
-        echo.set_icmp_code(IcmpCode(0));
-        echo.set_identifier(identifier);
-        echo.set_sequence_number(sequence);
-        let payload: Vec<u8> = (0..payload_size).map(|i| (i & 0xff) as u8).collect();
-        echo.set_payload(&payload);
-        echo.set_checksum(0);
-    }
-    let cksum = pnet::packet::icmp::checksum(&IcmpPacket::new(&buf[icmp_off..]).unwrap());
-    MutableEchoRequestPacket::new(&mut buf[icmp_off..])
-        .unwrap()
-        .set_checksum(cksum);
-
-    match tx.send_to(&buf, None) {
+    match tx.send_to(frame.as_bytes(), None) {
         Some(Ok(())) => Ok(()),
         Some(Err(e)) => Err(e.into()),
         None => Err(Error::SendDropped),
