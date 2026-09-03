@@ -1,6 +1,8 @@
 # pingw
 ping via a gateway without touching the kernel's routing table
 
+![noot noot](./static/noot.png)
+
 given an interface + prospective gateway ip address on that interface's network, pingw will:
 - arp resolve the MAC address of the gateway, then
 - use the mac address of the gateway to construct the raw frame
